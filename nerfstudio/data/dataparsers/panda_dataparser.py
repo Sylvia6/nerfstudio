@@ -36,11 +36,6 @@ from nerfstudio.data.dataparsers.base_dataparser import (
 from nerfstudio.data.scene_box import SceneBox
 
 
-# OPENCV_TO_OPENGL = torch.DoubleTensor([[1, 0, 0, 0],
-#                                        [0, -1, 0, 0],
-#                                        [0, 0, -1, 0],
-#                                        [0, 0, 0, 1]])
-
 def rotation_translation_to_pose(p):
     """Convert quaternion rotation and translation vectors to 4x4 matrix"""
     r_quat = [v for v in p['heading'].values()]
@@ -119,36 +114,6 @@ class Pandar(DataParser):
         c2w[:, :3, 3] -= c2w[:, :3, 3].mean(dim=0)
         # scale poses
         c2w[:, :3, 3] /= c2w[:, :3, 3].abs().max()
-        
-        
-        # transform1 = np.array(
-        #     [
-        #         [0, -1, 0, 0],
-        #         [0, 0, -1, 0],
-        #         [1, 0, 0, 0],
-        #         [0, 0, 0, 1],
-        #     ]
-        # )
-        # transform2 = np.array(
-        #     [
-        #         [0, 0, 1, 0],
-        #         [0, 1, 0, 0],
-        #         [-1, 0, 0, 0],
-        #         [0, 0, 0, 1],
-        #     ]
-        # )
-        
-        # # rotate to opencv frame
-        # c2w = transform1 @ c2w.T
-
-        # # convert from opencv camera to nerfstudio camera
-        # c2w[0:3, 1:3] *= -1
-        # c2w = c2w[np.array([1, 0, 2, 3]), :]
-        # c2w[2, :] *= -1
-
-        # # rotate to z-up in viewer
-        # c2w = transform2 @ c2w
-        
         
         cameras = Cameras(
             camera_to_worlds=c2w[:, :3, :],
