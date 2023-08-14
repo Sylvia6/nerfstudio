@@ -25,6 +25,7 @@ import torch
 
 from glob import glob
 import json, cv2
+import pickle
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.data.dataparsers.base_dataparser import (
@@ -35,35 +36,17 @@ from nerfstudio.data.dataparsers.base_dataparser import (
 from nerfstudio.data.scene_box import SceneBox
 
 
-def rotation_translation_to_pose(p):
-    """Convert quaternion rotation and translation vectors to 4x4 matrix"""
-    r_quat = [v for v in p['heading'].values()]
-    t_vec = [v for v in p['position'].values()]
-    pose = np.eye(4)
+opencv2opengl = np.array(
+    [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+)
+        
 
-    # NB: Nuscenes recommends pyquaternion, which uses scalar-first format (w x y z)
-    # https://github.com/nutonomy/nuscenes-devkit/issues/545#issuecomment-766509242
-    # https://github.com/KieranWynn/pyquaternion/blob/99025c17bab1c55265d61add13375433b35251af/pyquaternion/quaternion.py#L299
-    # https://fzheng.me/2017/11/12/quaternion_conventions_en/
-    pose[:3, :3] = pyquaternion.Quaternion(r_quat).rotation_matrix
-    pose[:3, 3] = t_vec
-    return pose
-
-def nerf_matrix_to_ngp(pose, scale=1):       
-    new_poses = np.array(
-        [
-            [pose[0, 0], -pose[0, 1], -pose[0, 2], pose[0, 3] * scale],
-            [pose[1, 0], -pose[1, 1], -pose[1, 2], pose[1, 3] * scale],
-            [pose[2, 0], -pose[2, 1], -pose[2, 2], pose[2, 3] * scale],
-            [0, 0, 0, 1],
-        ],
-        dtype=np.float32,
-    )
-    return new_poses
-
-
+def load_pickle(path):
+    with open(path, 'rb') as f:
+        return pickle.load(f, encoding='latin1')
+        
 @dataclass
-class PandaDataParserConfig(DataParserConfig):
+class PlusDataParserConfig(DataParserConfig):
     """NuScenes dataset config.
     NuScenes (https://www.nuscenes.org/nuscenes) is an autonomous driving dataset containing 1000 20s clips.
     Each clip was recorded with a suite of sensors including 6 surround cameras.
@@ -72,42 +55,44 @@ class PandaDataParserConfig(DataParserConfig):
     To create these masks use nerfstudio/scripts/datasets/process_nuscenes_masks.py.
     """
 
-    _target: Type = field(default_factory=lambda: Pandar)
+    _target: Type = field(default_factory=lambda: Plus)
     """target class to instantiate"""
-    data: Path = Path("/mnt/intel/jupyterhub/lilu/pandaset")  # TODO: rename to scene but keep checkpoint saving name?
+    data: Path = Path("/mnt/intel/artifact_management/auto-labeling-multi-frame/j7_10-multi-frame_manual_all_bag/000210_20211111T153653_j7-00010_42_1to21.db")  # TODO: rename to scene but keep checkpoint saving name?
     """Name of the scene."""
-    seq: str = '016'
-    cameras: Tuple[Literal["back", "front", "front_left", "front_right", "left", "right"], ...] = ("front")
+    # seq: str = '016'
+    cameras: Tuple[Literal["back", "front", "front_left", "front_right", "left", "right"], ...] = ("front_left")
     """Which cameras to use."""
     train_split_fraction: float = 1. 
     # 0.9
     """The percent of images to use for training. The remaining images are for eval."""
 
 @dataclass
-class Pandar(DataParser):
-    """Pandar DatasetParser"""
+class Plus(DataParser):
+    """Plus DatasetParser"""
 
-    config: PandaDataParserConfig
+    config: PlusDataParserConfig
 
     def _generate_dataparser_outputs(self, split="train"):
-        camera_path = f'{self.config.data}/{self.config.seq}/camera/{self.config.cameras}_camera'
-        image_filenames = sorted(glob(f'{camera_path}/*.jpg')) 
-        with open(f'{camera_path}/poses.json', 'r') as f:
-            pose_data = json.load(f)
-            c2w = np.array([
-                nerf_matrix_to_ngp(rotation_translation_to_pose(p)) for p in pose_data
-            ])
-        with open(f'{camera_path}/intrinsics.json', 'r') as f:
-            cam_data = json.load(f)
-            K = np.array(list(cam_data.values()))            
-        with open(f'{self.config.data}/{self.config.seq}/meta/timestamps.json', 'r') as f:    
-            time_data = np.array(json.load(f))
+        image_filenames = sorted(glob(f'{self.config.data}/{self.config.cameras}/*.png'))
         
-        times = torch.tensor(time_data - time_data[0], dtype=torch.float32)
+        calibration_file = os.path.join(self.config.data, "calib", ("%06d"%0)+".pkl")
+        calib = load_pickle(calibration_file)
+        K = calib['P1']
+        cam_i_imu =  calib[f"Tr_cam_to_imu_{self.config.cameras}"]
+        
+        poses = []
+        for frame in range(0, len(image_filenames)):
+            info = load_pickle(os.path.join(self.config.data, 'ego_pos_with_vel', ("%06d"%frame)+".pkl"))
+            poses.append(info['ego_pose'])
+        c2w = np.array(poses) @ cam_i_imu @ opencv2opengl
+        
+        timestamp_path = os.path.join(self.config.data, "timestamp")
+        timestamps = np.array([load_pickle(os.path.join(timestamp_path, ("%06d"%frame)+".pkl")) for frame in range(0, len(image_filenames))])
+        times = torch.tensor(timestamps - timestamps[0], dtype=torch.float32)
                 
         image_size = cv2.imread(image_filenames[0]).shape[:2]
         
-        c2w = torch.from_numpy(c2w)
+        c2w = torch.from_numpy(c2w.astype(np.float32))
         # center poses
         c2w[:, :3, 3] -= c2w[:, :3, 3].mean(dim=0)
         # scale poses
@@ -115,10 +100,10 @@ class Pandar(DataParser):
         
         cameras = Cameras(
             camera_to_worlds=c2w[:, :3, :],
-            fx=K[0],
-            fy=K[1],
-            cx=K[2],
-            cy=K[3],
+            fx=K[0,0],
+            fy=K[1,1],
+            cx=K[0,2],
+            cy=K[1,2],
             height=image_size[0],
             width=image_size[1],
             camera_type=CameraType.PERSPECTIVE,            
